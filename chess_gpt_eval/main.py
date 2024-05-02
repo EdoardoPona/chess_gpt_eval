@@ -6,11 +6,15 @@ import csv
 import random
 import time
 import platform
+import chess_gpt_eval
+
 
 # NOTE: LLAMA AND NANOGPT ARE EXPERIMENTAL PLAYERS that most people won't need to use
 # They are commented by default to avoid unnecessary dependencies such as pytorch.
 # from llama_module import BaseLlamaPlayer, LocalLlamaPlayer, LocalLoraLlamaPlayer
 # from nanogpt.nanogpt_module import NanoGptPlayer
+import chess_gpt_eval.gpt_inputs
+import chess_gpt_eval.gpt_inputs.prompt
 import gpt_query
 
 from typing import Optional, Tuple
@@ -28,6 +32,8 @@ class LegalMoveResponse:
 
 # Define base Player class
 class Player:
+    name: str = 'player'
+
     def get_move(self, board: chess.Board, game_state: str, temperature: float) -> str:
         raise NotImplementedError
 
@@ -36,7 +42,8 @@ class Player:
 
 
 class GPTPlayer(Player):
-    def __init__(self, model: str):
+    def __init__(self, model: str, name: str = 'gpt_player'):
+        self.name = name
         with open("gpt_inputs/api_key.txt", "r") as f:
             openai.api_key = f.read().strip()
         self.model = model
@@ -71,7 +78,8 @@ class StockfishPlayer(Player):
         else:
             raise OSError("Unsupported operating system")
 
-    def __init__(self, skill_level: int, play_time: float):
+    def __init__(self, skill_level: int, play_time: float, name: str = 'stockfish_player'):
+        self.name = name
         self._skill_level = skill_level
         self._play_time = play_time
         # If getting started, you need to run brew install stockfish
@@ -140,6 +148,7 @@ def record_results(
     player_two_failed_to_find_legal_move: bool,
     total_moves: int,
     illegal_moves: int,
+    save_dir: str,
 ):
     unique_game_id = generate_unique_game_id()
 
@@ -200,7 +209,7 @@ def record_results(
 
     if RUN_FOR_ANALYSIS:
         csv_file_path = (
-            f"logs/{player_one_recording_name}_vs_{player_two_recording_name}"
+            f"{save_dir}/{player_one.name}_vs_{player_two.name}"
         )
         csv_file_path = csv_file_path.replace(
             ".", "_"
@@ -395,13 +404,16 @@ def play_game(
     player_two: Player,
     max_games: int = 10,
     randomize_opening_moves: Optional[int] = None,
+    save_results=True,
+    save_dir='logs',
 ):
     # NOTE: I'm being very particular with game_state formatting because I want to match the PGN notation exactly
     # It looks like this: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 etc. HOWEVER, GPT prompts should not end with a trailing whitespace
     # due to tokenization issues. If you make changes, ensure it still matches the PGN notation exactly.
     for _ in range(max_games):  # Play 10 games
-        with open("gpt_inputs/prompt.txt", "r") as f:
-            game_state = f.read()
+        # with open("gpt_inputs/prompt.txt", "r") as f:
+        #     game_state = f.read()
+        game_state = chess_gpt_eval.gpt_inputs.prompt.game_state
         board = chess.Board()
 
         if randomize_opening_moves is not None:
@@ -480,23 +492,27 @@ def play_game(
         print(f"Result: {board.result()}")
         print(board)
         print()
-        record_results(
-            board,
-            player_one,
-            player_two,
-            game_state,
-            player_one_illegal_moves,
-            player_two_illegal_moves,
-            player_one_legal_moves,
-            player_two_legal_moves,
-            total_time,
-            player_one_resignation,
-            player_two_resignation,
-            player_one_failed_to_find_legal_move,
-            player_two_failed_to_find_legal_move,
-            total_moves,
-            illegal_moves,
-        )
+
+
+        if save_results and not (save_dir is None):
+            record_results(
+                board,
+                player_one,
+                player_two,
+                game_state,
+                player_one_illegal_moves,
+                player_two_illegal_moves,
+                player_one_legal_moves,
+                player_two_legal_moves,
+                total_time,
+                player_one_resignation,
+                player_two_resignation,
+                player_one_failed_to_find_legal_move,
+                player_two_failed_to_find_legal_move,
+                total_moves,
+                illegal_moves,
+                save_dir,
+            )
     if isinstance(player_one, StockfishPlayer):
         player_one.close()
     if isinstance(player_two, StockfishPlayer):
@@ -513,17 +529,17 @@ if NANOGPT:
 recording_file = "logs/determine.csv"  # default recording file. Because we are using list [player_ones], recording_file is overwritten
 player_ones = ["stockfish_16layers_ckpt_no_optimizer.pt"]
 player_ones = ["gpt-3.5-turbo-instruct"]
-player_two_recording_name = "stockfish_sweep"
+
+
 if __name__ == "__main__":
-    for player in player_ones:
-        player_one_recording_name = player
+    for player_one in player_ones:
         for i in range(11):
             num_games = 100
-            player_one = GPTPlayer(model=player)
+            player_one = GPTPlayer(model=player_one, name=player_one)
             # player_one = GPTPlayer(model="gpt-4")
             # player_one = StockfishPlayer(skill_level=-1, play_time=0.1)
             # player_one = NanoGptPlayer(model_name=player_one_recording_name)
-            player_two = StockfishPlayer(skill_level=i, play_time=0.1)
+            player_two = StockfishPlayer(skill_level=i, play_time=0.1, name=f"stockfish_lvl{i}")
             # player_two = GPTPlayer(model="gpt-4")
             # player_two = GPTPlayer(model="gpt-3.5-turbo-instruct")
 
