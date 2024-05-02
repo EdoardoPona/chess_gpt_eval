@@ -7,6 +7,7 @@ import random
 import time
 import platform
 import chess_gpt_eval
+from multiprocessing import Pool
 
 
 # NOTE: LLAMA AND NANOGPT ARE EXPERIMENTAL PLAYERS that most people won't need to use
@@ -356,7 +357,7 @@ def play_turn(
     else:
         board.push(move_uci)
         game_state += move_san
-        print(move_san, end=" ")
+        # print(move_san, end=" ")
 
     return game_state, resignation, failed_to_find_legal_move, illegal_moves
 
@@ -395,130 +396,171 @@ def initialize_game_with_random_moves(
         # If the loop completes without a break, raise an error
         raise Exception("Failed to initialize the game after maximum attempts.")
 
-    print(game_state)
+    # print(game_state)
     return game_state, board
 
 
+# TODO optionally return game info
 def play_game(
     player_one: Player,
     player_two: Player,
-    max_games: int = 10,
     randomize_opening_moves: Optional[int] = None,
     save_results=True,
     save_dir='logs',
+    close_players=True,
+    verbose=False,
 ):
     # NOTE: I'm being very particular with game_state formatting because I want to match the PGN notation exactly
     # It looks like this: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 etc. HOWEVER, GPT prompts should not end with a trailing whitespace
     # due to tokenization issues. If you make changes, ensure it still matches the PGN notation exactly.
-    for _ in range(max_games):  # Play 10 games
-        # with open("gpt_inputs/prompt.txt", "r") as f:
-        #     game_state = f.read()
-        game_state = chess_gpt_eval.gpt_inputs.prompt.game_state
-        board = chess.Board()
+    # TODO map these to multiple processes 
+    # with open("gpt_inputs/prompt.txt", "r") as f:
+    #     game_state = f.read()
+    game_state = chess_gpt_eval.gpt_inputs.prompt.game_state
+    board = chess.Board()
 
-        if randomize_opening_moves is not None:
-            game_state, board = initialize_game_with_random_moves(
-                board, game_state, randomize_opening_moves
-            )
+    if randomize_opening_moves is not None:
+        game_state, board = initialize_game_with_random_moves(
+            board, game_state, randomize_opening_moves
+        )
 
-        player_one_illegal_moves = 0
-        player_two_illegal_moves = 0
-        player_one_legal_moves = 0
-        player_two_legal_moves = 0
-        player_one_resignation = False
-        player_two_resignation = False
-        player_one_failed_to_find_legal_move = False
-        player_two_failed_to_find_legal_move = False
-        start_time = time.time()
+    player_one_illegal_moves = 0
+    player_two_illegal_moves = 0
+    player_one_legal_moves = 0
+    player_two_legal_moves = 0
+    player_one_resignation = False
+    player_two_resignation = False
+    player_one_failed_to_find_legal_move = False
+    player_two_failed_to_find_legal_move = False
+    start_time = time.time()
 
-        total_moves = 0
-        illegal_moves = 0
+    total_moves = 0
+    illegal_moves = 0
 
-        while not board.is_game_over():
-            with open("game.txt", "w") as f:
-                f.write(game_state)
-            current_move_num = str(board.fullmove_number) + "."
-            total_moves += 1
-            # I increment legal moves here so player_two isn't penalized for the game ending before its turn
-            player_one_legal_moves += 1
-            player_two_legal_moves += 1
+    while not board.is_game_over():
+        with open("game.txt", "w") as f:
+            f.write(game_state)
+        current_move_num = str(board.fullmove_number) + "."
+        total_moves += 1
+        # I increment legal moves here so player_two isn't penalized for the game ending before its turn
+        player_one_legal_moves += 1
+        player_two_legal_moves += 1
 
-            # this if statement may be overkill, just trying to get format to exactly match PGN notation
-            if board.fullmove_number != 1:
-                game_state += " "
-            game_state += current_move_num
+        # this if statement may be overkill, just trying to get format to exactly match PGN notation
+        if board.fullmove_number != 1:
+            game_state += " "
+        game_state += current_move_num
+        if verbose:
             print(f"{current_move_num}", end="")
 
-            (
-                game_state,
-                player_one_resignation,
-                player_one_failed_to_find_legal_move,
-                illegal_moves_one,
-            ) = play_turn(player_one, board, game_state, player_one=True)
-            player_one_illegal_moves += illegal_moves_one
-            if illegal_moves_one != 0:
-                player_one_legal_moves -= 1
-            if (
-                board.is_game_over()
-                or player_one_resignation
-                or player_one_failed_to_find_legal_move
-            ):
-                break
+        (
+            game_state,
+            player_one_resignation,
+            player_one_failed_to_find_legal_move,
+            illegal_moves_one,
+        ) = play_turn(player_one, board, game_state, player_one=True)
+        player_one_illegal_moves += illegal_moves_one
+        if illegal_moves_one != 0:
+            player_one_legal_moves -= 1
+        if (
+            board.is_game_over()
+            or player_one_resignation
+            or player_one_failed_to_find_legal_move
+        ):
+            break
 
-            (
-                game_state,
-                player_two_resignation,
-                player_two_failed_to_find_legal_move,
-                illegal_moves_two,
-            ) = play_turn(player_two, board, game_state, player_one=False)
-            player_two_illegal_moves += illegal_moves_two
-            if illegal_moves_two != 0:
-                player_two_legal_moves -= 1
-            if (
-                board.is_game_over()
-                or player_two_resignation
-                or player_two_failed_to_find_legal_move
-            ):
-                break
+        (
+            game_state,
+            player_two_resignation,
+            player_two_failed_to_find_legal_move,
+            illegal_moves_two,
+        ) = play_turn(player_two, board, game_state, player_one=False)
+        player_two_illegal_moves += illegal_moves_two
+        if illegal_moves_two != 0:
+            player_two_legal_moves -= 1
+        if (
+            board.is_game_over()
+            or player_two_resignation
+            or player_two_failed_to_find_legal_move
+        ):
+            break
 
+        if verbose:
             print("\n", end="")
 
-            if total_moves > MAX_MOVES:
-                break
+        if total_moves > MAX_MOVES:
+            break
 
-        end_time = time.time()
-        total_time = end_time - start_time
+    end_time = time.time()
+    total_time = end_time - start_time
+
+    if verbose:
         print(f"\nGame over. Total time: {total_time} seconds")
         print(f"Result: {board.result()}")
         print(board)
         print()
 
 
-        if save_results and not (save_dir is None):
-            record_results(
-                board,
-                player_one,
-                player_two,
-                game_state,
-                player_one_illegal_moves,
-                player_two_illegal_moves,
-                player_one_legal_moves,
-                player_two_legal_moves,
-                total_time,
-                player_one_resignation,
-                player_two_resignation,
-                player_one_failed_to_find_legal_move,
-                player_two_failed_to_find_legal_move,
-                total_moves,
-                illegal_moves,
-                save_dir,
-            )
-    if isinstance(player_one, StockfishPlayer):
-        player_one.close()
-    if isinstance(player_two, StockfishPlayer):
-        player_two.close()
+    if save_results and not (save_dir is None):
+        record_results(
+            board,
+            player_one,
+            player_two,
+            game_state,
+            player_one_illegal_moves,
+            player_two_illegal_moves,
+            player_one_legal_moves,
+            player_two_legal_moves,
+            total_time,
+            player_one_resignation,
+            player_two_resignation,
+            player_one_failed_to_find_legal_move,
+            player_two_failed_to_find_legal_move,
+            total_moves,
+            illegal_moves,
+            save_dir,
+        )
+
+    if close_players:
+        if isinstance(player_one, StockfishPlayer):
+            player_one.close()
+        if isinstance(player_two, StockfishPlayer):
+            player_two.close()
 
         # print(game_state)
+
+
+def _wrapped_play_game(player_one_args, player_two_args, kwargs):
+    # we need to create the players inside the worker, because they can't be pickled
+    player_one_type = player_one_args[0]
+    player_one = player_one_type(*player_one_args[1:])
+
+    player_two_type = player_two_args[0]
+    player_two = player_two_type(*player_two_args[1:])
+
+    return play_game(player_one, player_two, **kwargs)
+
+
+def play_game_batch(
+        player_one_args: list | tuple, 
+        player_two_args: list | tuple, 
+        kwargs,
+    ):
+    # Create a list of tuples, each containing the arguments for one game
+    assert len(player_one_args) == len(player_two_args), 'there must be the same number of player_one and player_two'
+    num_games = len(player_one_args)
+
+    for i in range(num_games):
+        if 'close_players' in kwargs[i]:
+            assert kwargs[i]['close_players'] != True, 'cannot close the players in between a batch game'
+        kwargs[i]['close_players'] = False    # overriding default argument if it hasn't been specified 
+    
+    games = [(player_one_args[i], player_two_args[i], kwargs[i]) for i in range(num_games)]
+
+    # Create a Pool object
+    with Pool() as p:
+        # Use the starmap method to run the games in parallel
+        p.starmap(_wrapped_play_game, games)
 
 
 NANOGPT = False
