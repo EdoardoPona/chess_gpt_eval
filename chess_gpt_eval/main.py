@@ -7,13 +7,13 @@ import random
 import time
 import platform
 import chess_gpt_eval
-from multiprocessing import Pool
+from multiprocessing import Pool, Queue
 
 
 # NOTE: LLAMA AND NANOGPT ARE EXPERIMENTAL PLAYERS that most people won't need to use
 # They are commented by default to avoid unnecessary dependencies such as pytorch.
 # from llama_module import BaseLlamaPlayer, LocalLlamaPlayer, LocalLoraLlamaPlayer
-# from nanogpt.nanogpt_module import NanoGptPlayer
+from chess_gpt_eval.nanogpt.nanogpt_module import NanoGptPlayer
 import chess_gpt_eval.gpt_inputs
 import chess_gpt_eval.gpt_inputs.prompt
 import gpt_query
@@ -338,6 +338,70 @@ def get_legal_move(
     )
 
 
+def get_legal_move_batch(
+    player: Player,      # TODO this is a BatchPlayer 
+    boards: list[chess.Board],
+    game_states: list[str],
+    player_one: bool,
+    max_attempts: int = 5,
+) -> LegalMoveResponse:
+    """Request a move from the player and ensure it's legal."""
+    move_san = None
+    move_uci = None
+    
+    num_games = len(boards)
+
+    # TODO IMPORTANT: instead of this make a 'toattempt' index set, and remove the games that are already done froim it 
+    done_mask = [False] * num_games
+
+    for attempt in range(max_attempts):
+        # mask out the games that are already done, don't run those again, or override the previous result  
+        moves_san = player.get_move_batched(
+            boards, game_states, min(((attempt / max_attempts) * 1) + 0.001, 0.5)
+        )
+
+        # Sometimes when GPT thinks it's the end of the game, it will just output the result
+        # Like "1-0". If so, this really isn't an illegal move, so we'll add a check for that.
+        for i, move_san in enumerate(moves_san):
+            if move_san is not None:
+                if move_san == "1-0" or move_san == "0-1" or move_san == "1/2-1/2":
+                    print(f"{move_san}, player has resigned")
+                    done_mask[i] = True
+                    return LegalMoveResponse(
+                        move_san=None,
+                        move_uci=None,
+                        attempts=attempt,
+                        is_resignation=True,
+                    )
+
+            try:
+                move_uci = boards[i].parse_san(move_san)
+            except Exception as e:
+                print(f"Error parsing move {move_san}: {e}")
+                # check if player is gpt-3.5-turbo-instruct
+                # only recording errors for gpt-3.5-turbo-instruct because it's errors are so rare
+                if player.get_config()["model"] == "gpt-3.5-turbo-instruct":
+                    with open("gpt-3.5-turbo-instruct-illegal-moves.txt", "a") as f:
+                        f.write(f"{game_states[i]}\n{move_san}\n")
+                # TODO should continue the outer loop
+                continue
+
+            if move_uci in boards[i].legal_moves:
+                if not move_san.startswith(" "):
+                    move_san = " " + move_san
+                done_mask[i] = True
+                return LegalMoveResponse(move_san, move_uci, attempt)
+            else:
+                print(f"Illegal move: {move_san}")
+
+    # If we reach here, the player has made illegal moves for all attempts.
+    print(f"{player} provided illegal moves for {max_attempts} attempts.")
+    return LegalMoveResponse(
+        move_san=None, move_uci=None, attempts=max_attempts, is_illegal_move=True
+    )
+
+
+
 def play_turn(
     player: Player, board: chess.Board, game_state: str, player_one: bool
 ) -> Tuple[str, bool, bool, int]:
@@ -347,6 +411,58 @@ def play_turn(
     move_uci = result.move_uci
     resignation = result.is_resignation
     failed_to_find_legal_move = result.is_illegal_move
+# Return is (move_san, move_uci, attempts, is_resignation, is_illegal_move)
+def get_legal_move(
+    player: Player,
+    board: chess.Board,
+    game_state: str,
+    player_one: bool,
+    max_attempts: int = 5,
+) -> LegalMoveResponse:
+    """Request a move from the player and ensure it's legal."""
+    move_san = None
+    move_uci = None
+
+    for attempt in range(max_attempts):
+        move_san = player.get_move(
+            board, game_state, min(((attempt / max_attempts) * 1) + 0.001, 0.5)
+        )
+
+        # Sometimes when GPT thinks it's the end of the game, it will just output the result
+        # Like "1-0". If so, this really isn't an illegal move, so we'll add a check for that.
+        if move_san is not None:
+            if move_san == "1-0" or move_san == "0-1" or move_san == "1/2-1/2":
+                print(f"{move_san}, player has resigned")
+                return LegalMoveResponse(
+                    move_san=None,
+                    move_uci=None,
+                    attempts=attempt,
+                    is_resignation=True,
+                )
+
+        try:
+            move_uci = board.parse_san(move_san)
+        except Exception as e:
+            print(f"Error parsing move {move_san}: {e}")
+            # check if player is gpt-3.5-turbo-instruct
+            # only recording errors for gpt-3.5-turbo-instruct because it's errors are so rare
+            if player.get_config()["model"] == "gpt-3.5-turbo-instruct":
+                with open("gpt-3.5-turbo-instruct-illegal-moves.txt", "a") as f:
+                    f.write(f"{game_state}\n{move_san}\n")
+            continue
+
+        if move_uci in board.legal_moves:
+            if not move_san.startswith(" "):
+                move_san = " " + move_san
+            return LegalMoveResponse(move_san, move_uci, attempt)
+        print(f"Illegal move: {move_san}")
+
+    # If we reach here, the player has made illegal moves for all attempts.
+    print(f"{player} provided illegal moves for {max_attempts} attempts.")
+    return LegalMoveResponse(
+        move_san=None, move_uci=None, attempts=max_attempts, is_illegal_move=True
+    )
+
 
     if resignation:
         print(f"{player} resigned with result: {board.result()}")
@@ -542,8 +658,10 @@ def _wrapped_play_game(player_one_args, player_two_args, kwargs):
 
 
 def play_game_batch(
-        player_one_args: list | tuple, 
-        player_two_args: list | tuple, 
+        player_one_type: type,
+        player_one_args: list[list], 
+        player_two_type: type,
+        player_two_args: list[list], 
         kwargs,
     ):
     # Create a list of tuples, each containing the arguments for one game
@@ -554,13 +672,53 @@ def play_game_batch(
         if 'close_players' in kwargs[i]:
             assert kwargs[i]['close_players'] != True, 'cannot close the players in between a batch game'
         kwargs[i]['close_players'] = False    # overriding default argument if it hasn't been specified 
-    
-    games = [(player_one_args[i], player_two_args[i], kwargs[i]) for i in range(num_games)]
+
+    games = [
+        (
+            [player_one_type] + player_one_args[i], 
+            [player_two_type] + player_two_args[i], 
+            kwargs[i]
+        ) 
+        for i in range(num_games)]
 
     # Create a Pool object
     with Pool() as p:
         # Use the starmap method to run the games in parallel
         p.starmap(_wrapped_play_game, games)
+
+
+def single_player_batch_process(to_main, from_main, player_two_instance):
+    while True: 
+        board_position = from_main.get()
+        if board_position is None:
+            break
+
+        player_two_instance.get_move(board_position)    # TODO is this correct? 
+        
+
+
+
+def play_mixed_game_batch(
+        player_one_type: type,
+        player_one_args: tuple,
+        player_two_type: type,
+        player_two_args: list[list | tuple],
+):
+    # NOTE we are assuming player 1 is a batch player, while player 2 a single player
+    num_games = len(player_two_args)
+    player_one = player_one_type(*player_one_args)
+    player_two_instances = [player_two_type(*args) for args in player_two_args]
+
+    from_main = [Queue() for _ in range(num_games)]
+    to_main = [Queue() for _ in range(num_games)]
+    
+    pool = Pool(num_games)
+    for i in range(num_games):
+        pool.apply_async(
+            single_player_batch_process, 
+            args=(to_main[i], from_main[i], player_two_instances[i])
+        )
+
 
 
 NANOGPT = False

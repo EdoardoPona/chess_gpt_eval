@@ -9,9 +9,9 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from typing import Optional
-from nanogpt.model import GPTConfig, GPT
+from chess_gpt_eval.nanogpt.model import GPTConfig, GPT
+import os 
 
-BASE_DIR = "nanogpt/"
 
 
 def add_activation_bias_to_state_dict(
@@ -66,11 +66,14 @@ def add_activation_bias_to_state_dict(
 class NanoGptPlayer:
     def __init__(
         self,
-        model_name: str,
+        model_path: str,
         activation_name: Optional[str] = None,
         activation_coefficient: Optional[float] = None,
+        name: str = 'nanogpt_player',
     ):
-        self.model_name = model_name
+        self.name = name
+        # NOTE we are assuming that meta.pkl is in the same base directory as the model checkpoint
+        self.model_path = model_path
         # -----------------------------------------------------------------------------
 
         init_from = "resume"  # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
@@ -89,9 +92,9 @@ class NanoGptPlayer:
         # device = "cpu"
         dtype = "float16"  # 'float32' or 'bfloat16' or 'float16'
         compile = False  # use PyTorch 2.0 to compile the model to be faster
-        exec(
-            open(f"{BASE_DIR}configurator.py").read()
-        )  # overrides from command line or config file
+        # exec(
+        #     open(f"{BASE_DIR}configurator.py").read()
+        # )  # overrides from command line or config file
         # -----------------------------------------------------------------------------
 
         torch.manual_seed(seed)
@@ -113,9 +116,7 @@ class NanoGptPlayer:
         # model
         if init_from == "resume":
             # init from a model saved in a specific directory
-            ckpt_path = os.path.join(BASE_DIR, out_dir, self.model_name)
-            ckpt_path = f"nanogpt/out/{self.model_name}"
-            checkpoint = torch.load(ckpt_path, map_location=device)
+            checkpoint = torch.load(self.model_path, map_location=device)
             gptconf = GPTConfig(**checkpoint["model_args"])
 
             state_dict = checkpoint["model"]
@@ -145,7 +146,7 @@ class NanoGptPlayer:
         if (
             init_from == "resume" and "config" in checkpoint and "dataset" in checkpoint["config"]
         ):  # older checkpoints might not have these...
-            meta_path = os.path.join(BASE_DIR, "out", "meta.pkl")
+            meta_path = f"{os.path.dirname(self.model_path)}/meta.pkl"
             load_meta = os.path.exists(meta_path)
         if load_meta:
             print(f"Loading meta from {meta_path}...")
@@ -182,6 +183,8 @@ class NanoGptPlayer:
         # We remove the space after the move number to match the training data
         game_state = re.sub(r"(\d+\.) ", r"\1", game_state)
 
+        # TODO when playing black we should add a space at the end (after the white move)
+        # this is because nanogpt breaks on space (token=0) generation 
         game_state = ";" + game_state
 
         # print("game_state", game_state)
@@ -192,8 +195,7 @@ class NanoGptPlayer:
         with torch.no_grad():
             with self.ctx:
                 for k in range(num_samples):
-                    y = self.model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-
+                    y = self.model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k, min_length=0)
                     model_response = self.decode(y[0].tolist())
 
         # print("model_response", model_response)
@@ -217,4 +219,4 @@ class NanoGptPlayer:
         return self.get_move_from_response(completion)
 
     def get_config(self) -> dict:
-        return {"model": self.model_name}
+        return {"model": self.model_path}
